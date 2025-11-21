@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Exam Seating Plan</title>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    
+    <style>
+        :root { --primary: #2563eb; --bg: #f8fafc; --card: #ffffff; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); margin: 0; padding: 20px; color: #1e293b; }
+        
+        .container { max-width: 600px; margin: 0 auto; }
+        
+        .header { text-align: center; margin-bottom: 30px; }
+        .header h1 { margin: 0; color: var(--primary); }
+        .header p { color: #64748b; margin-top: 5px; }
+
+        /* Search Box */
+        .search-box { position: relative; margin-bottom: 20px; }
+        input { width: 100%; padding: 15px 20px; border: 2px solid #e2e8f0; border-radius: 12px; font-size: 16px; outline: none; box-sizing: border-box; transition: 0.3s; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2); }
+        
+        /* Status Messages */
+        #status { text-align: center; font-size: 0.9rem; color: #64748b; margin-bottom: 20px; }
+        .loading { color: #d97706; font-weight: bold; }
+        .ready { color: #059669; font-weight: bold; }
+
+        /* Results */
+        .card { background: var(--card); padding: 20px; margin-bottom: 15px; border-radius: 12px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border-left: 5px solid var(--primary); animation: slideIn 0.3s ease-out; }
+        .card h3 { margin: 0 0 5px 0; font-size: 1.2rem; }
+        .meta { display: flex; justify-content: space-between; color: #475569; font-size: 0.95rem; margin-top: 8px; }
+        .room-tag { background: #e0f2fe; color: #0369a1; padding: 4px 8px; border-radius: 6px; font-weight: 600; }
+        
+        .no-result { text-align: center; color: #dc2626; display: none; font-weight: 500; }
+        
+        @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h1>🏛️ Exam Seating</h1>
+        <p>Find your room and seat instantly</p>
+    </div>
+
+    <div id="status" class="loading">Initializing system...</div>
+
+    <div class="search-box">
+        <input type="text" id="searchInput" placeholder="🔍 Enter Roll No (e.g. 25K-6044) or Name..." disabled>
+    </div>
+
+    <div id="results"></div>
+    <div id="noResult" class="no-result">No student found matching that query.</div>
+</div>
+
+<script>
+    // --- CONFIGURATION ---
+    // MAKE SURE YOUR PDF IS NAMED EXACTLY THIS AND IN THE SAME FOLDER
+    const PDF_FILENAME = "plan.pdf"; 
+    
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+    let allStudents = [];
+    const statusEl = document.getElementById('status');
+    const searchInput = document.getElementById('searchInput');
+    const resultsDiv = document.getElementById('results');
+    const noResultDiv = document.getElementById('noResult');
+
+    // 1. Load and Parse PDF on Startup
+    window.addEventListener('DOMContentLoaded', async () => {
+        try {
+            statusEl.innerText = "⏳ Loading Seating Plan PDF...";
+            statusEl.className = "loading";
+            
+            // Fetch the PDF file
+            const loadingTask = pdfjsLib.getDocument(PDF_FILENAME);
+            const pdf = await loadingTask.promise;
+            
+            statusEl.innerText = `📖 Scanning ${pdf.numPages} pages for student data...`;
+            
+            // Loop through all pages
+            for (let i = 1; i <= pdf.numPages; i++) {
+                const page = await pdf.getPage(i);
+                const textContent = await page.getTextContent();
+                const textItems = textContent.items;
+                
+                // Merge text items into a single string for easier regex
+                // We add newlines based on vertical position changes to keep rows somewhat intact
+                let pageText = "";
+                let lastY = -1;
+                
+                for (let item of textItems) {
+                    if (lastY !== -1 && Math.abs(item.transform[5] - lastY) > 5) {
+                        pageText += "\n"; // New line if vertical position changes significantly
+                    }
+                    pageText += item.str + " ";
+                    lastY = item.transform[5];
+                }
+
+                // --- PARSING LOGIC (Customized for your file) ---
+                
+                // A. Find Room Name (e.g., "AB1RoomE 1" or "CS1002")
+                // Looks for "Room" or typical labels near the top
+                let room = "Unknown Room";
+                const roomMatch = pageText.match(/(AB\d+Room\w*\s?\d*|Auditorium|Lab\s?\d+)/i);
+                if (roomMatch) room = roomMatch[0].trim();
+
+                // B. Find Students
+                // Pattern: 25K-6044 (2 digits, K/Any char, hyphen, 4 digits)
+                // We split by lines to ensure we get the name on the same line
+                const lines = pageText.split('\n');
+                
+                lines.forEach(line => {
+                    const rollMatch = line.match(/(\d{2}[A-Z]{1}-\d{4})/);
+                    if (rollMatch) {
+                        const rollNo = rollMatch[0];
+                        
+                        // Get name: Remove the Roll No, remove numbers (seat nos), remove symbols
+                        let rawName = line.replace(rollNo, '').replace(/\d+/g, '').replace(/[_☐]/g, '');
+                        let name = rawName.trim();
+                        
+                        // Cleanup: Remove "Tick only", "Sign", etc.
+                        name = name.replace(/(Tick only|Sign|Declaration)/gi, '').trim();
+
+                        // Clean up leading/trailing weird characters
+                        name = name.replace(/^[^\w]+|[^\w]+$/g, '');
+
+                        if (name.length > 2) {
+                            allStudents.push({ roll: rollNo, name: name, room: room });
+                        }
+                    }
+                });
+            }
+
+            // parsing complete
+            statusEl.innerHTML = `✅ System Ready. Loaded <b>${allStudents.length}</b> students.`;
+            statusEl.className = "ready";
+            searchInput.disabled = false;
+            searchInput.focus();
+
+        } catch (error) {
+            console.error(error);
+            statusEl.innerHTML = `❌ Error: Could not load "plan.pdf". <br>Make sure the file is in the same folder and you are running this on a server (like Netlify).`;
+            statusEl.className = "no-result";
+        }
+    });
+
+    // 2. Search Functionality
+    searchInput.addEventListener('input', (e) => {
+        const query = e.target.value.toUpperCase().trim();
+        resultsDiv.innerHTML = "";
+        noResultDiv.style.display = "none";
+
+        if (query.length < 2) return; // Wait for 2 chars
+
+        // Filter students
+        const matches = allStudents.filter(s => 
+            s.roll.includes(query) || 
+            s.name.toUpperCase().includes(query)
+        );
+
+        if (matches.length === 0) {
+            noResultDiv.style.display = "block";
+        } else {
+            // Limit to 20 results to prevent lag
+            matches.slice(0, 20).forEach(student => {
+                const div = document.createElement('div');
+                div.className = 'card';
+                div.innerHTML = `
+                    <h3>${student.name}</h3>
+                    <div class="meta">
+                        <span>🆔 ${student.roll}</span>
+                        <span class="room-tag">📍 ${student.room}</span>
+                    </div>
+                `;
+                resultsDiv.appendChild(div);
+            });
+        }
+    });
+</script>
+
+</body>
+</html>
